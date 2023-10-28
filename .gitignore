@@ -5,6 +5,7 @@ __pycache__/
 API_key.txt
 # C extensions
 *.so
+pdfs/
 
 # Distribution / packaging
 .Python
