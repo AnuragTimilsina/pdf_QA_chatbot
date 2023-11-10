@@ -1,4 +1,4 @@
-from langchain.document_loaders import PDFPlumberLoader
+from langchain.document_loaders import PyPDFLoader
 from langchain.text_splitter import CharacterTextSplitter, TokenTextSplitter
 from transformers import pipeline
 from langchain.prompts import PromptTemplate
@@ -32,12 +32,14 @@ class pdfQNA:
     @classmethod
     def create_instructor_xl(cls): 
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        return HuggingFaceInstructEmbeddings(model_name=EMB_INSTRUCTOR_XL, model_kwargs={"device": device})
+        # return HuggingFaceInstructEmbeddings(model_name=EMB_INSTRUCTOR_XL, model_kwargs={"device": device})
+        return HuggingFaceInstructEmbeddings(model_name=EMB_INSTRUCTOR_XL)
 
     @classmethod
     def create_sbert_mpnet(cls): 
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        return HuggingFaceEmbeddings(model_name=EMB_SBERT_MINILM, model_kwargs={"device": device})
+        # return HuggingFaceEmbeddings(model_name=EMB_SBERT_MINILM, model_kwargs={"device": device})
+        return HuggingFaceEmbeddings(model_name=EMB_SBERT_MINILM)
     
     @classmethod
     def create_flan_t5_xxl(cls, load_in_8bit=False): 
@@ -185,10 +187,10 @@ class pdfQNA:
         if persist_directory and os.path.exists(persist_directory): 
             ## Load from the persist db
             self.vectordb = Chroma(persist_directory=persist_directory, embedding_function=self.embedding)
-        elif pdf_path and os.path.exists(persist_directory): 
+        elif pdf_path and os.path.exists(pdf_path):
 
             ## 1. Extract the documents 
-            loader = PDFPlumberLoader(pdf_path)
+            loader = PyPDFLoader(pdf_path)
             documents = loader.load()
 
             ## 2. Split the texts
@@ -203,4 +205,51 @@ class pdfQNA:
 
         else: 
             raise ValueError("!!!!!!!!!!!!!!!! NO PDF found !!!!!!!!!!!!!!!")
+        
 
+    def retreival_qa_chain(self):
+        """
+        Creates retrieval qa chain using vectordb as retrivar and LLM to complete the prompt
+        """
+        ##TODO: Use custom prompt
+        self.retriever = self.vectordb.as_retriever(search_kwargs={"k":3})
+        
+        if self.config["llm"] == LLM_OPENAI_GPT35:
+          # Use ChatGPT API
+          self.qa = RetrievalQA.from_chain_type(llm=OpenAI(model_name=LLM_OPENAI_GPT35, temperature=0.), chain_type="stuff",\
+                                      retriever=self.vectordb.as_retriever(search_kwargs={"k":3}))
+        else:
+            hf_llm = HuggingFacePipeline(pipeline=self.llm,model_id=self.config["llm"])
+
+            self.qa = RetrievalQA.from_chain_type(llm=hf_llm, chain_type="stuff",retriever=self.retriever)
+            if self.config["llm"] == LLM_FLAN_T5_SMALL or self.config["llm"] == LLM_FLAN_T5_BASE or self.config["llm"] == LLM_FLAN_T5_LARGE:
+                question_t5_template = """
+                context: {context}
+                question: {question}
+                answer: 
+                """
+                QUESTION_T5_PROMPT = PromptTemplate(
+                    template=question_t5_template, input_variables=["context", "question"]
+                )
+                self.qa.combine_documents_chain.llm_chain.prompt = QUESTION_T5_PROMPT
+            self.qa.combine_documents_chain.verbose = True
+            self.qa.return_source_documents = True
+
+    def answer_query(self,question:str) ->str:
+        """
+        Answer the question
+        """
+
+        answer_dict = self.qa({"query":question,})
+        print(answer_dict)
+        answer = answer_dict["result"]
+        if self.config["llm"] == LLM_FASTCHAT_T5_XL:
+            answer = self._clean_fastchat_t5_output(answer)
+        return answer
+    
+    def _clean_fastchat_t5_output(self, answer: str) -> str:
+        # Remove <pad> tags, double spaces, trailing newline
+        answer = re.sub(r"<pad>\s+", "", answer)
+        answer = re.sub(r"  ", " ", answer)
+        answer = re.sub(r"\n$", "", answer)
+        return answer
